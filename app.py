@@ -10,26 +10,18 @@ import numpy as np
 import streamlit as st
 import plotly.express as px
 
-# ------------------------- PAGE CONFIG (первая st-команда!) -------------------
-st.set_page_config(page_title="Экспертный штат: совпадение профилей", layout="wide")
 
-# ------------------------- CONFIG ---------------------------------------------
-# Укажи пути к файлам при необходимости
-FILE_PATHS = [
-    "Профили_ВЭС.xlsx",
-    "Профили_Специалисты.xlsx",
-    "Профили_эксперты.xlsx",
-]
-
-AUTO_DISCOVER = False
-SEARCH_DIR = "/Users/karimalibekov/Desktop/stat_consult_analysis"
+# ------------------------- LIGHT MODE: CONFIG ---------------------------------
+# Берём готовые метрики из файла (создаётся precompute_metrics.py)
+PRECOMPUTED_PARQUET = "profiles_with_metrics.parquet"
+PRECOMPUTED_EXCEL   = "profiles_with_metrics.xlsx"
 
 ABOUT_COL = "Коротко о себе"
 
-# В расчет метрик включаем ТОЛЬКО эти три поля
+# В расчётах и визуализациях используем эти три поля
 COMPARE_COLS = ["Специализации", "Ключевые слова", "Решаемые задачи"]
 
-# человекочитаемые названия метрик
+# Человекочитаемые названия метрик
 METRIC_LABELS = {
     "Специализации": "Specialty Fit",
     "Ключевые слова": "Keyword Fit",
@@ -43,105 +35,12 @@ LOW_THR = 0.40       # ниже — "Низкий (Исправить)"
 HIGH_THR = 0.60      # выше — "Высокий (ОК)"
 TARGET_PTA = 0.65    # целевой средний PTA компании (для KPI)
 
-# ------------------------- HELPERS --------------------------------------------
-def discover_files(folder: str):
-    if not os.path.isdir(folder):
-        return []
-    return sorted([
-        os.path.join(folder, name)
-        for name in os.listdir(folder)
-        if name.startswith("Профили_") and name.endswith(".xlsx")
-    ])
-
-@st.cache_data(show_spinner=True)
-def load_all(paths):
-    frames = []
-    for p in paths:
-        if not os.path.exists(p):
-            st.warning(f"Файл не найден: {p}")
-            continue
-        try:
-            df = pd.read_excel(p)
-            df["__source"] = os.path.basename(p)
-            frames.append(df)
-        except Exception as e:
-            st.warning(f"Не удалось прочитать {p}: {e}")
-    if not frames:
-        return pd.DataFrame()
-    df = pd.concat(frames, ignore_index=True)
-    # базовая чистка строк
-    df = df.applymap(lambda x: x.strip() if isinstance(x, str) else x)
-    df = df.drop_duplicates()
-    return df
-
+# ------------------------- HELPERS (без моделей) ------------------------------
 def pick_id_col(df: pd.DataFrame):
     for c in ID_CANDIDATES:
         if c in df.columns:
             return c
     return df.columns[0]
-
-@st.cache_resource(show_spinner=True)
-def load_model():
-    from sentence_transformers import SentenceTransformer
-    return SentenceTransformer("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-
-@st.cache_data(show_spinner=True)
-def compute_similarities(df_in: pd.DataFrame, about_col: str, compare_cols: list) -> pd.DataFrame:
-    """
-    Считаем косинусные сходства между эмбеддингами 'Коротко о себе' и тремя полями:
-    'Специализации', 'Ключевые слова', 'Решаемые задачи'.
-    PTA = среднее этих трех метрик по доступным столбцам.
-    """
-    from sentence_transformers import util
-
-    df = df_in.copy()
-    sim_cols = []
-
-    # если нет about — вернем пустые метрики
-    if about_col not in df.columns:
-        for c in compare_cols:
-            df[f"sim_{c}"] = np.nan
-        df["PTA"] = np.nan
-        return df
-
-    model = load_model()
-
-    # валидные "О себе"
-    mask = df[about_col].notna() & (df[about_col].astype(str).str.len() >= 5)
-    df["_has_about"] = mask
-
-    about_texts = df.loc[mask, about_col].astype(str).tolist()
-    if len(about_texts) == 0:
-        for c in compare_cols:
-            df[f"sim_{c}"] = np.nan
-        df["PTA"] = np.nan
-        return df
-
-    about_embs = model.encode(about_texts, convert_to_tensor=True, show_progress_bar=True)
-    idx_map = {idx: i for i, idx in enumerate(df.index[df["_has_about"]])}
-
-    # по каждому из трех столбцов
-    for col in compare_cols:
-        values = []
-        for idx, row in df.iterrows():
-            if not row["_has_about"]:
-                values.append(np.nan)
-                continue
-            other = row.get(col, None)
-            if pd.isna(other) or len(str(other)) < 3:
-                values.append(np.nan)
-                continue
-            emb_other = model.encode(str(other), convert_to_tensor=True)
-            emb_about = about_embs[idx_map[idx]]
-            cos = float(util.cos_sim(emb_about, emb_other))
-            values.append(cos)
-        sim_name = f"sim_{col}"
-        df[sim_name] = values
-        sim_cols.append(sim_name)
-
-    # PTA = среднее по трем sim_* (по доступным)
-    df["PTA"] = df[sim_cols].mean(axis=1)
-    return df
 
 def cohort_label(pta: float) -> str:
     if pd.isna(pta): return "Недостаточно данных"
@@ -149,6 +48,7 @@ def cohort_label(pta: float) -> str:
     if pta < HIGH_THR: return "Средний (Внимание)"
     return "Высокий (ОК)"
 
+@st.cache_data(show_spinner=True)
 def to_excel_bytes(df: pd.DataFrame, sheet_name: str = "data") -> bytes:
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -165,31 +65,34 @@ def fmt_pct(x):
 def safe_mean(series):
     return float(series.mean()) if len(series) else float("nan")
 
-# ------------------------- LOAD DATA ------------------------------------------
-if AUTO_DISCOVER:
-    FILE_PATHS = discover_files(SEARCH_DIR)
-
-df_raw = load_all(FILE_PATHS)
-if df_raw.empty:
-    st.error("Нет данных. Проверь пути к Excel или включи AUTO_DISCOVER.")
+# ------------------------- LOAD DATA (only precomputed) -----------------------
+@st.cache_data(show_spinner=True)
+def load_precomputed():
+    if os.path.exists(PRECOMPUTED_PARQUET):
+        return pd.read_parquet(PRECOMPUTED_PARQUET)
+    if os.path.exists(PRECOMPUTED_EXCEL):
+        return pd.read_excel(PRECOMPUTED_EXCEL)
+    st.error(
+        "Не найден файл с предрасчитанными метриками.\n"
+        "Добавь profiles_with_metrics.parquet или profiles_with_metrics.xlsx в репозиторий."
+    )
     st.stop()
 
-ID_COL = pick_id_col(df_raw)
+df = load_precomputed()
 
-# оставим только реально существующие из трех нужных столбцов
-compare_cols = [c for c in COMPARE_COLS if c in df_raw.columns]
-missing = [c for c in COMPARE_COLS if c not in df_raw.columns]
-if missing:
-    st.warning("Отсутствуют столбцы (не будут учтены в расчете): " + ", ".join(missing))
+# Если по какой-то причине когорты не сохранены — пересчитаем по PTA
+if "Когорта" not in df.columns and "PTA" in df.columns:
+    df["Когорта"] = df["PTA"].apply(cohort_label)
 
-with st.spinner("Считаем совпадение 'О себе' с фактами по 3 метрикам…"):
-    df = compute_similarities(df_raw, ABOUT_COL, compare_cols)
+# ID-колонка
+ID_COL = pick_id_col(df)
 
-df["Когорта"] = df["PTA"].apply(cohort_label)
-
-# для удобства: список sim_* колонок и маппинг метрик
-sim_cols_present = [f"sim_{c}" for c in compare_cols]
+# Три метрики: используем те, для которых есть sim_* колонки
+# (в предрасчётном файле они уже есть: sim_Специализации, sim_Ключевые слова, sim_Решаемые задачи)
+compare_cols = [c for c in COMPARE_COLS if f"sim_{c}" in df.columns or c in df.columns]
+sim_cols_present = [f"sim_{c}" for c in compare_cols if f"sim_{c}" in df.columns]
 metric_names = [METRIC_LABELS[c] for c in compare_cols]
+
 
 # ------------------------- SIDEBAR FILTERS ------------------------------------
 st.sidebar.header("Фильтры")
