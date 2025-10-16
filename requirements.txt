@@ -1,7 +1,6 @@
 streamlit
 pandas
 plotly
-sentence-transformers
-torch
-tqdm
 openpyxl
+pyarrow
+tqdm
