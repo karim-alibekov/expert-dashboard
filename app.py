@@ -16,9 +16,9 @@ st.set_page_config(page_title="Экспертный штат: совпадени
 # ------------------------- CONFIG ---------------------------------------------
 # Укажи пути к файлам при необходимости
 FILE_PATHS = [
-    "/Users/karimalibekov/Desktop/stat_consult_analysis/Профили_ВЭС.xlsx",
-    "/Users/karimalibekov/Desktop/stat_consult_analysis/Профили_Специалисты.xlsx",
-    "/Users/karimalibekov/Desktop/stat_consult_analysis/Профили_эксперты.xlsx",
+    "Профили_ВЭС.xlsx",
+    "Профили_Специалисты.xlsx",
+    "Профили_эксперты.xlsx",
 ]
 
 AUTO_DISCOVER = False
